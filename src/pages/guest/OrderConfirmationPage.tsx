@@ -26,11 +26,6 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { generateGuestInvoicePdf } from "@/utils/generateInvoicePdf";
-import {
-  calculateAdminFee,
-  getPaymentMethodLabel,
-  QRIS_MAX_AMOUNT,
-} from "@/lib/payment-constants";
 
 interface OrderItem {
   id: string;
@@ -130,20 +125,17 @@ export default function OrderConfirmationPage() {
       0,
     );
 
-    // Use stored admin_fee if available, otherwise calculate
-    const adminFee = order.admin_fee ?? calculateAdminFee(baseAmount);
-    const totalWithFee = baseAmount + adminFee;
-    const paymentMethod =
-      order.payment_method ??
-      (baseAmount <= QRIS_MAX_AMOUNT ? "qris" : "bank_transfer");
-    const paymentLabel = getPaymentMethodLabel(baseAmount);
+    // admin_fee/payment_method are only known once Midtrans reports back
+    // which channel the customer picked (via payment-webhook)
+    const adminFee = order.admin_fee;
+    const paymentMethod = order.payment_method;
+    const totalWithFee = baseAmount + (adminFee ?? 0);
 
     return {
       baseAmount,
       adminFee,
       totalWithFee,
       paymentMethod,
-      paymentLabel,
     };
   }, [order]);
 
@@ -326,23 +318,17 @@ export default function OrderConfirmationPage() {
                     <span className="font-semibold">Lakukan Pembayaran</span>
                   </div>
                   <div className="text-sm text-muted-foreground space-y-1">
-                    <p>
-                      Subtotal:{" "}
-                      <span className="font-medium text-foreground">
-                        Rp {paymentInfo?.baseAmount.toLocaleString("id-ID")}
-                      </span>
-                    </p>
-                    <p>
-                      Biaya Admin ({paymentInfo?.paymentLabel}):{" "}
-                      <span className="font-medium text-foreground">
-                        Rp {paymentInfo?.adminFee.toLocaleString("id-ID")}
-                      </span>
-                    </p>
                     <p className="text-base">
                       Total:{" "}
                       <span className="font-bold text-foreground">
-                        Rp {paymentInfo?.totalWithFee.toLocaleString("id-ID")}
+                        Rp {paymentInfo?.baseAmount.toLocaleString("id-ID")}
                       </span>
+                    </p>
+                    <p className="text-xs">
+                      Pilih metode pembayaran (QRIS, GoPay, ShopeePay,
+                      Virtual Account, atau Kartu Kredit) di halaman
+                      pembayaran. Biaya admin (jika ada) mengikuti metode
+                      yang Anda pilih.
                     </p>
                   </div>
                   <Button

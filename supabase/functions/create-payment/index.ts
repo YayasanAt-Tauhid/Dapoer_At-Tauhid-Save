@@ -1,14 +1,18 @@
 /**
  * Edge Function: create-payment
- * Version: 7.0 - Production Ready
- * 
+ * Version: 8.0 - Production Ready
+ *
  * Creates Midtrans payment transactions for Dapoer At-Tauhid orders.
- * Supports both single and BULK orders with automatic QRIS/VA selection.
- * 
- * Business Rules:
- * - Amount <= 628,000 → QRIS (0.7% fee)
- * - Amount > 628,000 → VA (Rp 4,400 flat fee)
- * - All transaction IDs prefixed with "DAPOER-"
+ * Supports both single and BULK orders with all Midtrans payment channels
+ * (QRIS, GoPay, ShopeePay, Virtual Account, Credit Card) offered together
+ * on the Snap payment page - the customer picks the method there.
+ *
+ * Admin fee is no longer calculated or added by this function. Midtrans
+ * applies its own surcharge per payment channel (configured in the
+ * Midtrans MAP dashboard) directly to the customer, and the actual fee
+ * charged is recorded by payment-webhook once the transaction settles.
+ *
+ * All transaction IDs are prefixed with "DAPOER-".
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -26,13 +30,6 @@ enum OrderStatus {
   FAILED = "failed",
   EXPIRED = "expired",
   CANCELLED = "cancelled",
-}
-
-/** Payment method enum */
-enum PaymentMethod {
-  QRIS = "qris",
-  BANK_TRANSFER = "bank_transfer",
-  CASH = "cash",
 }
 
 /** Order item from database */
@@ -74,10 +71,7 @@ interface Order {
 /** Payment info response */
 interface PaymentInfo {
   baseAmount: number;
-  adminFee: number;
   totalAmount: number;
-  paymentMethod: PaymentMethod;
-  feeType: string;
 }
 
 /** Midtrans item detail */
@@ -102,11 +96,15 @@ interface CreatePaymentRequest {
 
 const DAPOER_PREFIX = "DAPOER";
 
-const PAYMENT_CONFIG = {
-  QRIS_MAX_AMOUNT: 628000,
-  QRIS_FEE_PERCENTAGE: 0.7,
-  VA_FEE_FLAT: 4400,
-} as const;
+// All payment channels offered together; the customer chooses on the Snap page.
+// Midtrans applies its own configured surcharge per channel to the customer.
+const ENABLED_PAYMENTS = [
+  "other_qris",
+  "gopay",
+  "shopeepay",
+  "bank_transfer",
+  "credit_card",
+];
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -137,35 +135,6 @@ function generateTransactionId(orderIds: string[]): string {
     return `${DAPOER_PREFIX}-${orderIds[0]}`;
   }
   return `${DAPOER_PREFIX}-BULK-${Date.now()}-${orderIds.length}`;
-}
-
-/** Calculate admin fee based on amount */
-function calculateAdminFee(baseAmount: number): {
-  fee: number;
-  method: PaymentMethod;
-  feeType: string;
-} {
-  if (baseAmount <= PAYMENT_CONFIG.QRIS_MAX_AMOUNT) {
-    const fee = Math.ceil((baseAmount * PAYMENT_CONFIG.QRIS_FEE_PERCENTAGE) / 100);
-    return {
-      fee,
-      method: PaymentMethod.QRIS,
-      feeType: `${PAYMENT_CONFIG.QRIS_FEE_PERCENTAGE}%`,
-    };
-  }
-  return {
-    fee: PAYMENT_CONFIG.VA_FEE_FLAT,
-    method: PaymentMethod.BANK_TRANSFER,
-    feeType: `Rp ${PAYMENT_CONFIG.VA_FEE_FLAT.toLocaleString("id-ID")}`,
-  };
-}
-
-/** Get enabled payment methods for Midtrans */
-function getEnabledPayments(baseAmount: number): string[] {
-  if (baseAmount <= PAYMENT_CONFIG.QRIS_MAX_AMOUNT) {
-    return ["other_qris"];
-  }
-  return ["bank_transfer"];
 }
 
 /** Validate delivery date is not in the past */
@@ -301,35 +270,17 @@ function canReuseToken(orders: Order[]): boolean {
 }
 
 /** Build payment info from orders */
-function buildPaymentInfo(orders: Order[], useExisting: boolean): PaymentInfo {
+function buildPaymentInfo(orders: Order[]): PaymentInfo {
   const baseAmount = orders.reduce((sum, order) => sum + order.total_amount, 0);
-  
-  if (useExisting && orders[0].admin_fee !== null) {
-    const adminFee = orders[0].admin_fee;
-    const paymentMethod = (orders[0].payment_method as PaymentMethod) || calculateAdminFee(baseAmount).method;
-    return {
-      baseAmount,
-      adminFee,
-      totalAmount: baseAmount + adminFee,
-      paymentMethod,
-      feeType: paymentMethod === PaymentMethod.QRIS
-        ? `${PAYMENT_CONFIG.QRIS_FEE_PERCENTAGE}%`
-        : `Rp ${PAYMENT_CONFIG.VA_FEE_FLAT.toLocaleString("id-ID")}`,
-    };
-  }
 
-  const { fee, method, feeType } = calculateAdminFee(baseAmount);
   return {
     baseAmount,
-    adminFee: fee,
-    totalAmount: baseAmount + fee,
-    paymentMethod: method,
-    feeType,
+    totalAmount: baseAmount,
   };
 }
 
 /** Build Midtrans item details */
-function buildItemDetails(orders: Order[], paymentInfo: PaymentInfo): MidtransItem[] {
+function buildItemDetails(orders: Order[]): MidtransItem[] {
   const items: MidtransItem[] = [];
 
   for (const order of orders) {
@@ -343,14 +294,6 @@ function buildItemDetails(orders: Order[], paymentInfo: PaymentInfo): MidtransIt
     }
   }
 
-  // Add admin fee as line item
-  items.push({
-    id: "admin-fee",
-    price: paymentInfo.adminFee,
-    quantity: 1,
-    name: `Biaya Admin (${paymentInfo.feeType})`,
-  });
-
   return items;
 }
 
@@ -360,8 +303,7 @@ async function createMidtransTransaction(
   totalAmount: number,
   items: MidtransItem[],
   customerName: string,
-  customerPhone: string,
-  paymentMethod: PaymentMethod
+  customerPhone: string
 ): Promise<{ token: string; redirectUrl: string }> {
   const serverKey = Deno.env.get("MIDTRANS_SERVER_KEY");
   if (!serverKey) {
@@ -372,10 +314,6 @@ async function createMidtransTransaction(
   const baseUrl = isProduction
     ? "https://app.midtrans.com"
     : "https://app.sandbox.midtrans.com";
-
-  const enabledPayments = paymentMethod === PaymentMethod.QRIS
-    ? ["other_qris"]
-    : ["bank_transfer"];
 
   const payload: Record<string, unknown> = {
     transaction_details: {
@@ -388,19 +326,14 @@ async function createMidtransTransaction(
       phone: customerPhone,
       email: "customer@dapoer-attauhid.com",
     },
-    enabled_payments: enabledPayments,
+    enabled_payments: ENABLED_PAYMENTS,
+    qris: { acquirer: "gopay" },
   };
 
-  // Add QRIS acquirer config
-  if (paymentMethod === PaymentMethod.QRIS) {
-    payload.qris = { acquirer: "gopay" };
-  }
-
-  log.info("Calling Midtrans API", { 
+  log.info("Calling Midtrans API", {
     url: `${baseUrl}/snap/v1/transactions`,
     transactionId,
     totalAmount,
-    paymentMethod,
     isProduction,
   });
 
@@ -434,9 +367,7 @@ async function updateOrdersWithPayment(
   orderIds: string[],
   transactionId: string,
   snapToken: string,
-  paymentUrl: string,
-  adminFee: number,
-  paymentMethod: PaymentMethod
+  paymentUrl: string
 ): Promise<void> {
   const { error } = await supabase
     .from("orders")
@@ -444,8 +375,6 @@ async function updateOrdersWithPayment(
       snap_token: snapToken,
       payment_url: paymentUrl,
       transaction_id: transactionId,
-      admin_fee: adminFee,
-      payment_method: paymentMethod,
       updated_at: new Date().toISOString(),
     })
     .in("id", orderIds);
@@ -516,9 +445,9 @@ serve(async (req) => {
     // Check for reusable token
     if (!forceNewToken && canReuseToken(orders)) {
       log.info("Reusing existing snap token");
-      
-      const paymentInfo = buildPaymentInfo(orders, true);
-      
+
+      const paymentInfo = buildPaymentInfo(orders);
+
       return jsonResponse({
         success: true,
         snapToken: orders[0].snap_token,
@@ -530,7 +459,7 @@ serve(async (req) => {
     }
 
     // Build payment info for new token
-    const paymentInfo = buildPaymentInfo(orders, false);
+    const paymentInfo = buildPaymentInfo(orders);
     log.info("Payment info calculated", paymentInfo);
 
     // Generate transaction ID with DAPOER prefix
@@ -538,7 +467,7 @@ serve(async (req) => {
     log.info("Transaction ID generated", { transactionId });
 
     // Build item details
-    const items = buildItemDetails(orders, paymentInfo);
+    const items = buildItemDetails(orders);
 
     // Get customer details
     const firstOrder = orders[0];
@@ -555,8 +484,7 @@ serve(async (req) => {
       paymentInfo.totalAmount,
       items,
       customerName,
-      customerPhone,
-      paymentInfo.paymentMethod
+      customerPhone
     );
 
     // Update orders with payment data
@@ -565,9 +493,7 @@ serve(async (req) => {
       orderIds,
       transactionId,
       token,
-      redirectUrl,
-      paymentInfo.adminFee,
-      paymentInfo.paymentMethod
+      redirectUrl
     );
 
     return jsonResponse({
