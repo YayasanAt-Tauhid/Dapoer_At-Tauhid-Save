@@ -1,14 +1,21 @@
 /**
  * Edge Function: payment-webhook
- * Version: 7.0 - Production Ready
- * 
+ * Version: 8.0 - Production Ready
+ *
  * Handles Midtrans payment notifications for Dapoer At-Tauhid.
  * Validates signatures and updates order statuses accordingly.
- * 
+ *
+ * Since create-payment no longer pre-computes the payment method or admin
+ * fee (Midtrans now applies its own per-channel surcharge directly to the
+ * customer), this webhook is the source of truth for both: it records the
+ * channel the customer actually picked (`payment_type`) and derives the
+ * admin fee as the difference between the notified `gross_amount` and the
+ * order's own `total_amount`.
+ *
  * Security:
  * - SHA-512 signature validation
  * - Only processes DAPOER- prefixed transactions
- * 
+ *
  * Status Mapping:
  * - settlement/capture(accept) → paid
  * - pending → pending
@@ -227,12 +234,14 @@ function createAdminClient(): SupabaseClient {
 async function updateSingleOrder(
   supabase: SupabaseClient,
   orderId: string,
-  status: OrderStatus
+  status: OrderStatus,
+  paymentType: string | undefined,
+  grossAmount: number
 ): Promise<number> {
   // First verify order exists
   const { data: existingOrder, error: fetchError } = await supabase
     .from("orders")
-    .select("id, status")
+    .select("id, status, total_amount")
     .eq("id", orderId)
     .maybeSingle();
 
@@ -252,12 +261,19 @@ async function updateSingleOrder(
     return 0;
   }
 
+  const updateData: Record<string, unknown> = {
+    status,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (paymentType) {
+    updateData.payment_method = paymentType;
+    updateData.admin_fee = Math.max(0, grossAmount - existingOrder.total_amount);
+  }
+
   const { error: updateError } = await supabase
     .from("orders")
-    .update({
-      status,
-      updated_at: new Date().toISOString(),
-    })
+    .update(updateData)
     .eq("id", orderId);
 
   if (updateError) {
@@ -265,7 +281,7 @@ async function updateSingleOrder(
     throw updateError;
   }
 
-  log.info("Order updated", { orderId, status });
+  log.info("Order updated", { orderId, status, paymentType });
   return 1;
 }
 
@@ -273,12 +289,14 @@ async function updateSingleOrder(
 async function updateBulkOrders(
   supabase: SupabaseClient,
   transactionId: string,
-  status: OrderStatus
+  status: OrderStatus,
+  paymentType: string | undefined,
+  grossAmount: number
 ): Promise<number> {
   // Find all orders with this transaction_id
   const { data: orders, error: fetchError } = await supabase
     .from("orders")
-    .select("id, status")
+    .select("id, status, total_amount")
     .eq("transaction_id", transactionId);
 
   if (fetchError) {
@@ -301,12 +319,20 @@ async function updateBulkOrders(
     return 0;
   }
 
+  const updateData: Record<string, unknown> = {
+    status,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (paymentType) {
+    const totalBaseAmount = orders.reduce((sum, order) => sum + order.total_amount, 0);
+    updateData.payment_method = paymentType;
+    updateData.admin_fee = Math.max(0, grossAmount - totalBaseAmount);
+  }
+
   const { error: updateError } = await supabase
     .from("orders")
-    .update({
-      status,
-      updated_at: new Date().toISOString(),
-    })
+    .update(updateData)
     .in("id", orderIdsToUpdate);
 
   if (updateError) {
@@ -314,9 +340,10 @@ async function updateBulkOrders(
     throw updateError;
   }
 
-  log.info("BULK orders updated", { 
-    transactionId, 
-    status, 
+  log.info("BULK orders updated", {
+    transactionId,
+    status,
+    paymentType,
     updatedCount: orderIdsToUpdate.length,
     orderIds: orderIdsToUpdate,
   });
@@ -395,15 +422,22 @@ serve(async (req) => {
     const supabase = createAdminClient();
 
     let updatedCount = 0;
+    const grossAmount = parseFloat(notification.gross_amount);
 
     // Handle BULK vs single order
     if (isBulkTransaction(orderId)) {
       log.info("Processing BULK transaction", { orderId });
-      updatedCount = await updateBulkOrders(supabase, orderId, orderStatus);
+      updatedCount = await updateBulkOrders(
+        supabase,
+        orderId,
+        orderStatus,
+        notification.payment_type,
+        grossAmount
+      );
     } else {
       // Extract UUID from order_id
       const uuid = extractOrderUuid(orderId);
-      
+
       if (!uuid) {
         log.warn("Could not extract UUID from order_id", { orderId });
         return successResponse({
@@ -414,7 +448,13 @@ serve(async (req) => {
       }
 
       log.info("Processing single order", { orderId, uuid });
-      updatedCount = await updateSingleOrder(supabase, uuid, orderStatus);
+      updatedCount = await updateSingleOrder(
+        supabase,
+        uuid,
+        orderStatus,
+        notification.payment_type,
+        grossAmount
+      );
     }
 
     return successResponse({

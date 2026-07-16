@@ -42,11 +42,6 @@ import {
 import { cn } from "@/lib/utils";
 import { useHolidays } from "@/hooks/useHolidays";
 import { supabase } from "@/integrations/supabase/client";
-import {
-  calculateAdminFee,
-  getPaymentMethodLabel,
-  QRIS_MAX_AMOUNT,
-} from "@/lib/payment-constants";
 
 export default function GuestCheckoutPage() {
   const { cart, getCartTotal, clearCart } = useApp();
@@ -68,25 +63,13 @@ export default function GuestCheckoutPage() {
     now > cutoffTime ? addDays(startOfDay(now), 1) : startOfDay(now);
   const maxDate = addDays(minDate, 7);
 
-  // Calculate admin fee based on cart total
   const paymentInfo = useMemo(() => {
     const baseAmount = cart.reduce(
       (sum, item) => sum + item.menuItem.price * item.quantity,
       0,
     );
-    const adminFee = calculateAdminFee(baseAmount);
-    const totalWithFee = baseAmount + adminFee;
-    const paymentMethod =
-      baseAmount <= QRIS_MAX_AMOUNT ? "qris" : "bank_transfer";
-    const paymentLabel = getPaymentMethodLabel(baseAmount);
 
-    return {
-      baseAmount,
-      adminFee,
-      totalWithFee,
-      paymentMethod,
-      paymentLabel,
-    };
+    return { baseAmount };
   }, [cart]);
 
   const isDateDisabled = (date: Date) => {
@@ -416,39 +399,19 @@ export default function GuestCheckoutPage() {
                   )}
                 </div>
 
-                {/* Payment Method Info */}
-                <div className="border-t border-border pt-4 space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Subtotal</span>
-                    <span>
-                      Rp {paymentInfo.baseAmount.toLocaleString("id-ID")}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground flex items-center gap-1">
-                      Biaya Admin
-                      <span className="text-xs text-primary">
-                        ({paymentInfo.paymentLabel})
-                      </span>
-                    </span>
-                    <span>
-                      Rp {paymentInfo.adminFee.toLocaleString("id-ID")}
-                    </span>
-                  </div>
-                </div>
-
+                {/* Payment Info */}
                 <div className="border-t border-border pt-4">
                   <div className="flex justify-between font-bold text-lg">
                     <span>Total Bayar</span>
                     <span className="text-primary">
-                      Rp {paymentInfo.totalWithFee.toLocaleString("id-ID")}
+                      Rp {paymentInfo.baseAmount.toLocaleString("id-ID")}
                     </span>
                   </div>
                   <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
                     <Info className="w-3 h-3" />
-                    {paymentInfo.paymentMethod === "qris"
-                      ? "Pembayaran via QRIS"
-                      : "Pembayaran via Virtual Account"}
+                    Pilih metode pembayaran (QRIS, GoPay, ShopeePay, Virtual
+                    Account, atau Kartu Kredit) di halaman pembayaran. Biaya
+                    admin (jika ada) mengikuti metode yang Anda pilih.
                   </p>
                 </div>
 
