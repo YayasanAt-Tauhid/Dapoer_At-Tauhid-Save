@@ -3,7 +3,7 @@
     "relation": ["delegate_permission/common.handle_all_urls"],
     "target": {
       "namespace": "android_app",
-      "package_name": "com.dapoer.attauhid",
+      "package_name": "id.or.hijrah_attauhid.dapoer.twa",
       "sha256_cert_fingerprints": [
         "50:E3:57:29:A2:4C:85:00:70:C7:4B:F3:55:58:37:EB:68:3E:99:CD:F6:49:46:B8:9E:3C:2C:72:79:33:19:40"
       ]
